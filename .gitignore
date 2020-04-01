@@ -1,3 +1,6 @@
+# Editor Junk Files
+*.swp
+
 # Prerequisites
 *.d
 
