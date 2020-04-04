@@ -9,25 +9,17 @@ REXE=receive
 
 all: debug release
 
-debug: $(SEXE).dbg $(REXE).dbg
-
-release: $(SEXE) $(REXE)
-
-$(SEXE):
-	@ $(MAKE) -C $(SND_DIR) release
-	cp $(SND_DIR)/$(SEXE) $(WRK_DIR)
-
-$(REXE):
-	@ $(MAKE) -C $(REC_DIR) release
-	cp $(REC_DIR)/$(REXE) $(WRK_DIR)
-
-$(SEXE).dbg:
+debug:
 	@ $(MAKE) -C $(SND_DIR) debug
-	cp $(SND_DIR)/$(SEXE).dbg $(WRK_DIR)
-
-$(REXE).dbg:
 	@ $(MAKE) -C $(REC_DIR) debug
-	cp $(REC_DIR)/$(REXE).dbg $(WRK_DIR)
+	@ cp $(SND_DIR)/$(SEXE).dbg $(WRK_DIR)
+	@ cp $(REC_DIR)/$(REXE).dbg $(WRK_DIR)
+
+release:
+	@ $(MAKE) -C $(SND_DIR) release
+	@ $(MAKE) -C $(REC_DIR) release
+	@ cp $(SND_DIR)/$(SEXE) $(WRK_DIR)
+	@ cp $(REC_DIR)/$(REXE) $(WRK_DIR)
 
 clean:
 	@ $(MAKE) -C $(REC_DIR) clean
