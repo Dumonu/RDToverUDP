@@ -5,6 +5,8 @@ REC_DIR=$(WRK_DIR)/receiver
 SEXE=send
 REXE=receive
 
+.PHONY: all debug release clean
+
 all: debug release
 
 debug: $(SEXE).dbg $(REXE).dbg

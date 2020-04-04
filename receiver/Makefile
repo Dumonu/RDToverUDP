@@ -8,6 +8,8 @@ OBJ_DIR=$(WRK_DIR)/build
 EXE=receive
 OBJ=$(addsuffix .o,$(basename $(wildcard *.c)))
 
+.PHONY: all debug release clean
+
 all: debug release
 
 debug: $(EXE).dbg
