@@ -13,20 +13,47 @@
 #include "global.h"
 #include "sock.h"
 
-// TODO: Think about whether you actually need more than one UDP socket for an
-// arbitrary number of RDT connections
-
 struct RDT_Pipe
 {
 	int sock_fd;
 	struct sockaddr_in local;
 	struct sockaddr_in remote;
 
+	// Bit 0: Socket Created (S)
+	// Bit 1: Socket Bound (B)
+	// Bit 2: Socket Listening (L)
+	// Bit 3: Socket Connected (C) (either connect or accept)
+	// 0000CLBS
 	uint8_t stateflags;
 
 	enum RDT_Protocol protocol;
 	/* TODO: add protocol implementation data here. */
+	uint8_t loc_seq;
+	uint8_t rem_seq;
 };
+
+struct RDT_Header
+{
+	uint8_t seqnum;	// sequence number of this packet
+	uint8_t acknum; // sequence number this packet is ACKing
+
+	// Bit 0: FIN
+	// Bit 1: SYN
+	// Bit 2: RST
+	// Bit 3: PSH (Not Used)
+	// Bit 4: ACK
+	// Bit 5: URG (Not Used)
+	// 000A0RSF
+	uint8_t flags; 
+	uint8_t rwnd; // receiver window - number of 100-byte packets receiver can accept
+	uint16_t checksum; // computed checksum - in network order
+};
+
+struct RDT_Packet
+{
+	struct RDT_Header header;
+	char payload[100]; // should be zero-padded if not full
+}
 
 // Internal Data Table
 bool RDT_initialized = false;	   // has the table been initialized?
@@ -42,6 +69,28 @@ struct RDT_Pipe *RDT_pipes = NULL; // The table itself
 #define BIND(i) (RDT_pipes[i].stateflags |= 0x01)
 #define LISTEN(i) (RDT_pipes[i].stateflags |= 0x01)
 #define CONNECT(i) (RDT_pipes[i].stateflags |= 0x01)
+
+/**
+ * Expects a buffer in network byte order.
+ * If the buffer has a zero-filled checksum field, this will compute the checksum.
+ * If the buffer does not have a zero-filled checksum field, this will check the
+ * checksum. If the result is 0, the check passes.
+ **/
+uint16_t RDT_inet_chksum(void* buf, size_t len)
+{
+	// convert to 16-bit words
+	uint16_t* words = (uint16_t*)buf;
+	size_t wlen = len / sizeof(*words);
+	// sum all words
+	uint32_t sum = 0;
+	for(int i = 0; i < wlen; ++i){
+		sum += ntohs(words[i]);
+	}
+	sum = (sum & 0x0000FFFF) + (sum & 0xFFFF0000); // add carry over
+	sum = (sum & 0x0000FFFF) + (sum & 0xFFFF0000); // add carry over of previous step
+	uint16_t chksum = (uint16_t)sum ^ 0xFFFF; // Truncate and flip all bits
+	return chksum;
+}
 
 int RDT_socket(enum RDT_Protocol protocol)
 {

@@ -2,6 +2,7 @@
 #define SOCK_H_202004061734
 
 enum RDT_Protocol {
+	SINGLE_PACKET,
 	GOBACKN,
 	SELECTIVE_REPEAT
 };
