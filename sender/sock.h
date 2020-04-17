@@ -8,7 +8,7 @@ enum RDT_Protocol {
 
 int RDT_socket(enum RDT_Protocol protocol);
 int RDT_bind(int pipe_idx, const char* addr, uint16_t port);
-int RDT_listent(int pipe_idx, int backlog); // don't know if I need
+int RDT_listen(int pipe_idx, int backlog); // don't know if I need
 int RDT_accept(int pipe_idx);
 int RDT_connect(int pipe_idx, const char* addr, uint16_t port);
 int RDT_send(int pipe_idx, const void* buf, size_t len);
