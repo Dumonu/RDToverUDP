@@ -8,7 +8,7 @@
 #define DBG_FPRINTF(...) fprintf(__VA_ARGS__)
 #else
 #define DBG_PRINTF(...) do{}while(0)
-#define DBG_PRINTF(...) do{}while(0)
+#define DBG_FPRINTF(...) do{}while(0)
 #endif
 
 #endif
