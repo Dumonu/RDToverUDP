@@ -171,6 +171,7 @@ void RDT_close(int pipe_idx)
 	{
 		DBG_FPRINTF(stderr, "RDT_close(%d): %s\n", pipe_idx, strerror(errno));
 	}
+	memset(RDT_pipes + pipe_idx, 0, sizeof(*RDT_pipes));
 }
 
 int RDT_info_addr_loc(int pipe_idx, char *buf, size_t len)
