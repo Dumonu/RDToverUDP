@@ -1,5 +1,6 @@
 # Editor Junk Files
 *.swp
+*.code-workspace
 
 # Prerequisites
 *.d
