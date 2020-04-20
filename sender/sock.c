@@ -3,10 +3,14 @@
 #include <stdint.h>
 #include <errno.h>
 #include <string.h>
+#include <time.h>
+#include <signal.h>
+#include <assert.h>
 
 #include <unistd.h>
 //#include <sys/type.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
@@ -25,6 +29,10 @@ struct RDT_Pipe
 	// Bit 3: Socket Connected (C) (either connect or accept)
 	// 0000CLBS
 	uint8_t stateflags;
+
+	uint32_t msec_timeout;
+
+	/* TODO: add backlog things here */
 
 	enum RDT_Protocol protocol;
 	/* TODO: add protocol implementation data here. */
@@ -53,7 +61,7 @@ struct RDT_Packet
 {
 	struct RDT_Header header;
 	char payload[100]; // should be zero-padded if not full
-}
+};
 
 // Internal Data Table
 bool RDT_initialized = false;	   // has the table been initialized?
@@ -66,9 +74,9 @@ struct RDT_Pipe *RDT_pipes = NULL; // The table itself
 #define CONNECTED(i) ((RDT_pipes[i].stateflags & 0x08) > 0)
 
 #define CREATE(i) (RDT_pipes[i].stateflags |= 0x01)
-#define BIND(i) (RDT_pipes[i].stateflags |= 0x01)
-#define LISTEN(i) (RDT_pipes[i].stateflags |= 0x01)
-#define CONNECT(i) (RDT_pipes[i].stateflags |= 0x01)
+#define BIND(i) (RDT_pipes[i].stateflags |= 0x02)
+#define LISTEN(i) (RDT_pipes[i].stateflags |= 0x04)
+#define CONNECT(i) (RDT_pipes[i].stateflags |= 0x08)
 
 /**
  * Expects a buffer in network byte order.
@@ -92,6 +100,24 @@ uint16_t RDT_inet_chksum(void* buf, size_t len)
 	return chksum;
 }
 
+int RDT_waitForData(int pipe_idx)
+{
+	fd_set socks;
+	FD_ZERO(&socks);
+	FD_SET(RDT_pipes[pipe_idx].sock_fd, &socks);
+	struct timeval timeout = {0};
+	timeout.tv_sec = RDT_pipes[pipe_idx].msec_timeout / 1000;
+	timeout.tv_usec = (RDT_pipes[pipe_idx].msec_timeout % 1000) * 1000;
+
+	return select(
+		RDT_pipes[pipe_idx].sock_fd + 1,
+		&socks,
+		NULL,
+		NULL,
+		&timeout
+	);
+}
+
 int RDT_socket(enum RDT_Protocol protocol)
 {
 	int sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -105,6 +131,7 @@ int RDT_socket(enum RDT_Protocol protocol)
 
 	if (!RDT_initialized)
 	{
+		srand(time(NULL));
 		RDT_pipes = calloc(10, sizeof(*RDT_pipes));
 		RDT_allocated = 10; // start by allocating 10 slots
 		RDT_initialized = true;
@@ -137,6 +164,9 @@ int RDT_socket(enum RDT_Protocol protocol)
 
 	RDT_pipes[newIdx].sock_fd = sock_fd;
 	RDT_pipes[newIdx].protocol = protocol;
+
+	// TODO: change this for real things
+	RDT_pipes[newIdx].msec_timeout = 1000;
 	/* TODO: Protocol data initialization here */
 	CREATE(newIdx);
 
@@ -179,21 +209,135 @@ int RDT_listen(int pipe_idx, int backlog)
 {
 	if (pipe_idx >= RDT_allocated)
 		return -1;
-	return -1;
+	if (!CREATED(pipe_idx) || !BOUND(pipe_idx))
+		return -1;
+
+	/* listen() normally only works for SOCK_STREAM or SOCK_SEQPACKET,
+	   so this will do the same thing for our RDT sockets. */
+	// TODO: Set up backlog things
+	LISTEN(pipe_idx);
+	return 0;
 }
 
 int RDT_accept(int pipe_idx)
 {
 	if (pipe_idx >= RDT_allocated)
 		return -1;
-	return -1;
+
+	if(!CREATED(pipe_idx) || !BOUND(pipe_idx))
+		return -1;
 }
 
 int RDT_connect(int pipe_idx, const char *addr, uint16_t port)
 {
-	if (pipe_idx >= RDT_allocated)
+	if (pipe_idx >= RDT_allocated){
+		DBG_FPRINTF(stderr, "RDT_connect: %d >= RDT_allocated\n", pipe_idx);
 		return -1;
-	return -1;
+	}
+	if(!CREATED(pipe_idx) || !BOUND(pipe_idx))
+	{
+		DBG_FPRINTF(stderr, "0x%x\n", RDT_pipes[pipe_idx].stateflags);
+		DBG_FPRINTF(stderr, "RDT_connect: %d not created or not bound\n", pipe_idx);
+		return -1;
+	}
+
+	// populate the remote address to which to connect
+	RDT_pipes[pipe_idx].remote.sin_family = AF_INET;
+	RDT_pipes[pipe_idx].remote.sin_port = port;
+	inet_aton(addr, &RDT_pipes[pipe_idx].remote.sin_addr);
+	memset(RDT_pipes[pipe_idx].remote.sin_zero, 0, 8);
+
+	// From man 2 connect:
+	// "If the socket sockfd is of type SOCK_DGRAM, then addr is the address to which
+	// datagrams are sent by default, and the only address from which datagrams are
+	// received"
+	// This is wonderful. It will allow automatic source verification.
+	connect(
+		RDT_pipes[pipe_idx].sock_fd,
+		(struct sockaddr*)&RDT_pipes[pipe_idx].remote,
+		sizeof(struct sockaddr_in)
+	);
+	RDT_pipes[pipe_idx].loc_seq = rand() % 256; // choose initial sequence number
+
+	struct RDT_Packet syn = {0};
+	syn.header.seqnum = RDT_pipes[pipe_idx].loc_seq;
+	syn.header.flags |= 2; // SYN bit
+	syn.header.rwnd = 1; // TODO: protocol defined; maybe leave as is for 3wh
+	uint16_t ckh = RDT_inet_chksum(&syn, sizeof(syn));
+	syn.header.checksum = htons(ckh);
+
+#ifdef DEBUG_
+	// Verify checksum computed properly
+	assert(RDT_inet_chksum(&syn, sizeof(syn)) == 0);
+#endif
+
+	// Transmit SYN message and wait for SYNACK
+	bool retransmit = true;
+	while(retransmit){
+		DBG_PRINTF("RDT_Connect: Sending SYN request to %s:%d\n", addr, port);
+		int ret = send(RDT_pipes[pipe_idx].sock_fd, &syn, sizeof(syn), 0);
+		if(ret != sizeof(syn)){
+			DBG_FPRINTF(stderr, "RDT_Connect: SYN message did not send correct "
+				"number of bytes.\n");
+			return -1;
+		}
+		struct RDT_Packet synack = {0};
+
+		ret = RDT_waitForData(pipe_idx);
+		if(ret == 0){
+			DBG_PRINTF("RDT_Connect: Timeout waiting for SYNACK\n");
+			continue;
+		} else if(ret < 0){
+			DBG_FPRINTF(stderr, "RDT_Connect: Error waiting for SYNACK: %s\n",
+				strerror(errno));
+				return -1;
+		}
+
+		ret = recv(RDT_pipes[pipe_idx].sock_fd, &synack, sizeof(synack), 0);
+		if(ret == -1){
+			DBG_FPRINTF(stderr, "RDT_Connect: Error reading SYNACK: %s", strerror(errno));
+			return -1;
+		}
+
+		if(RDT_inet_chksum(&synack, sizeof(synack)) != 0){
+			DBG_PRINTF("RDT_Connect: Message received corrupt\n");
+			continue;
+		}
+		
+		if((synack.header.flags & 0x12) != 0x12){
+			DBG_PRINTF("RDT_Connect: Message received not a SYNACK\n");
+			continue;
+		}
+
+		if(synack.header.acknum != RDT_pipes[pipe_idx].loc_seq){
+			DBG_PRINTF("RDT_Connect: Message received ACKing incorrect seqnum\n");
+			continue;
+		}
+
+		DBG_PRINTF("RDT_Connect: Received SYNACK from %s:%d\n", addr, port);
+		RDT_pipes[pipe_idx].rem_seq = synack.header.seqnum;
+		retransmit = false;
+	}
+
+	// SYN sent, SYNACK received
+	struct RDT_Packet ack = {0};
+	ack.header.acknum = RDT_pipes[pipe_idx].rem_seq;
+	ack.header.flags = 0x10;
+	ack.header.rwnd = 1; //TODO: same as above
+	ckh = RDT_inet_chksum(&ack, sizeof(ack));
+	ack.header.checksum = htons(ckh);
+#ifdef DEBUG_
+	// Verify checksum computed properly
+	assert(RDT_inet_chksum(&ack, sizeof(ack)) == 0);
+#endif
+
+	DBG_PRINTF("RDT_Connect: Sending ACK to %s:%d\n", addr, port);
+	int ret = send(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
+	if(ret != sizeof(ack)){
+		DBG_FPRINTF(stderr, "RDT_Connect: Error sending ACK: %s\n", strerror(errno));
+		return -1;
+	}
+	CONNECT(pipe_idx);
 }
 
 int RDT_send(int pipe_idx, const void *buf, size_t len)
