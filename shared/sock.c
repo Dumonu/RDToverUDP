@@ -224,20 +224,124 @@ int RDT_accept(int pipe_idx)
 	if (pipe_idx >= RDT_allocated)
 		return -1;
 
-	if(!CREATED(pipe_idx) || !BOUND(pipe_idx))
+	if(!CREATED(pipe_idx) || !BOUND(pipe_idx) || !LISTENING(pipe_idx) ||
+			CONNECTED(pipe_idx))
 		return -1;
+
+	struct RDT_Packet syn = {0};
+	struct sockaddr_in cli_addr = {0};
+	socklen_t cli_addr_len = sizeof(cli_addr);
+	bool wait = true;
+	do{
+		int ret = recvfrom(
+			RDT_pipes[pipe_idx].sock_fd,
+			&syn,
+			sizeof(syn),
+			0,
+			(struct sockaddr *)&cli_addr,
+			&cli_addr_len
+		);
+		if(ret != sizeof(syn)){
+			DBG_FPRINTF(stderr, "RDT_accept: Incoming connection not valid\n");
+			continue;
+		}
+		if(RDT_inet_chksum(&syn, sizeof(syn)) != 0){
+			DBG_FPRINTF(stderr, "RDT_accept: Incoming packet failed checksum\n");
+			continue;
+		}
+		if(syn.header.flags & 2 != 2){
+			DBG_FPRINTF(stderr, "RDT_accept: Incoming packet is not a SYN\n");
+			continue;
+		}
+
+		DBG_PRINTF("RDT_accept: Received SYN from %s:%d\n", inet_ntoa(cli_addr.sin_addr), 
+			cli_addr.sin_port);
+
+		wait = false;
+	} while(wait);
+
+	// See comment below
+	connect(RDT_pipes[pipe_idx].sock_fd, (struct sockaddr*)&cli_addr, sizeof(cli_addr));
+	RDT_pipes[pipe_idx].remote = cli_addr; // should be trivially copyable
+	RDT_pipes[pipe_idx].loc_seq = rand() % 256;
+	RDT_pipes[pipe_idx].rem_seq = syn.header.seqnum;
+
+	struct RDT_Packet synack = {0};
+	synack.header.seqnum = RDT_pipes[pipe_idx].loc_seq;
+	synack.header.acknum = RDT_pipes[pipe_idx].rem_seq;
+	synack.header.flags = 0x12; // 00010010
+	synack.header.rwnd = 1; // TODO: protocol defined; maybe leave as is for 3wh
+	int chksum = RDT_inet_chksum(&synack, sizeof(synack));
+	synack.header.checksum = htons(chksum);
+#ifdef DEBUG_
+	assert(RDT_inet_chksum(&synack, sizeof(synack)) == 0);
+#endif
+
+	// Transmit SYNACK message and wait for ACK
+	bool retransmit = true;
+	while(retransmit){
+		DBG_PRINTF("RDT_accept: Sending SYNACK response to %s:%d\n",
+			inet_ntoa(cli_addr.sin_addr), cli_addr.sin_port);
+		int ret = send(RDT_pipes[pipe_idx].sock_fd, &synack, sizeof(synack), 0);
+		if(ret != sizeof(synack)){
+			DBG_FPRINTF(stderr, "RDT_accept: SYNACK message did not send correct "
+				"number of bytes.\n");
+			return -1;
+		}
+		struct RDT_Packet ack = {0};
+
+		ret = RDT_waitForData(pipe_idx);
+		if(ret == 0){
+			DBG_PRINTF("RDT_accept: Timeout waiting for ACK\n");
+			continue;
+		} else if(ret < 0){
+			DBG_FPRINTF(stderr, "RDT_accept: Error waiting for ACK: %s\n",
+				strerror(errno));
+				return -1;
+		}
+
+		ret = recv(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
+		if(ret == -1){
+			DBG_FPRINTF(stderr, "RDT_accept: Error reading ACK: %s", strerror(errno));
+			return -1;
+		}
+
+		if(RDT_inet_chksum(&ack, sizeof(ack)) != 0){
+			DBG_PRINTF("RDT_accept: Message received corrupt\n");
+			continue;
+		}
+		
+		if((ack.header.flags & 0x10) != 0x10){
+			DBG_PRINTF("RDT_accept: Message received not an ACK\n");
+			continue;
+		}
+
+		if(ack.header.acknum != RDT_pipes[pipe_idx].loc_seq){
+			DBG_PRINTF("RDT_accept: Message received ACKing incorrect seqnum\n");
+			continue;
+		}
+
+		DBG_PRINTF("RDT_accept: Received ACK from %s:%d\n", inet_ntoa(cli_addr.sin_addr),
+			cli_addr.sin_port);
+		retransmit = false;
+	}
+	RDT_pipes[pipe_idx].loc_seq++;
+	CONNECT(pipe_idx);
+	return pipe_idx;
 }
 
+// FIXME: Update connect to allow a port change for accept()'s new socket
 int RDT_connect(int pipe_idx, const char *addr, uint16_t port)
 {
 	if (pipe_idx >= RDT_allocated){
 		DBG_FPRINTF(stderr, "RDT_connect: %d >= RDT_allocated\n", pipe_idx);
 		return -1;
 	}
-	if(!CREATED(pipe_idx) || !BOUND(pipe_idx))
+	if(!CREATED(pipe_idx) || !BOUND(pipe_idx) || CONNECTED(pipe_idx))
 	{
 		DBG_FPRINTF(stderr, "0x%x\n", RDT_pipes[pipe_idx].stateflags);
-		DBG_FPRINTF(stderr, "RDT_connect: %d not created or not bound\n", pipe_idx);
+		DBG_FPRINTF(stderr, "RDT_connect: %d not created or not bound or already"
+			" connected\n", pipe_idx);
 		return -1;
 	}
 
@@ -338,6 +442,7 @@ int RDT_connect(int pipe_idx, const char *addr, uint16_t port)
 		return -1;
 	}
 	CONNECT(pipe_idx);
+	return 0;
 }
 
 int RDT_send(int pipe_idx, const void *buf, size_t len)
