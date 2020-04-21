@@ -17,4 +17,6 @@ int main(void)
 
 	RDT_bind(client, "localhost", 5791);
 	RDT_connect(client, "localhost", 18752);
+
+	RDT_close(client);
 }

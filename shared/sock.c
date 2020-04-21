@@ -27,7 +27,9 @@ struct RDT_Pipe
 	// Bit 1: Socket Bound (B)
 	// Bit 2: Socket Listening (L)
 	// Bit 3: Socket Connected (C) (either connect or accept)
-	// 0000CLBS
+	// Bit 4: Local Side FIN (F)
+	// Bit 5: Remote Side FIN (A) - for ACK
+	// 00AFCLBS
 	uint8_t stateflags;
 
 	uint32_t msec_timeout;
@@ -72,11 +74,15 @@ struct RDT_Pipe *RDT_pipes = NULL; // The table itself
 #define BOUND(i) ((RDT_pipes[i].stateflags & 0x02) > 0)
 #define LISTENING(i) ((RDT_pipes[i].stateflags & 0x04) > 0)
 #define CONNECTED(i) ((RDT_pipes[i].stateflags & 0x08) > 0)
+#define LOCALCLOSED(i) ((RDT_pipes[i].stateflags & 0x10) > 0)
+#define REMOTECLOSED(i) ((RDT_pipes[i].stateflags & 0x20) > 0)
 
 #define CREATE(i) (RDT_pipes[i].stateflags |= 0x01)
 #define BIND(i) (RDT_pipes[i].stateflags |= 0x02)
 #define LISTEN(i) (RDT_pipes[i].stateflags |= 0x04)
 #define CONNECT(i) (RDT_pipes[i].stateflags |= 0x08)
+#define LOCALCLOSE(i) (RDT_pipes[i].stateflags |= 0x10)
+#define REMOTECLOSE(i) (RDT_pipes[i].stateflags |= 0x20)
 
 /**
  * Expects a buffer in network byte order.
@@ -463,6 +469,121 @@ void RDT_close(int pipe_idx)
 {
 	if (pipe_idx >= RDT_allocated)
 		return;
+
+	if(CONNECTED(pipe_idx)){
+		// Implement finishing handshakes
+
+		struct RDT_Packet fin = {0};
+		fin.header.seqnum = RDT_pipes[pipe_idx].loc_seq;
+		fin.header.flags = 0x01;
+		fin.header.rwnd = 1;
+		uint16_t chksum = RDT_inet_chksum(&fin, sizeof(fin));
+		fin.header.checksum = htons(chksum);
+#ifdef DEBUG_
+		assert(RDT_inet_chksum(&fin, sizeof(fin)) == 0);
+#endif
+
+		struct RDT_Packet remfin = {0};
+		// Transmit SYN message and wait for SYNACK
+		bool retransmit = true;
+		while (retransmit)
+		{
+			DBG_PRINTF("RDT_close: Sending FIN request to %s:%d\n",
+				inet_ntoa(RDT_pipes[pipe_idx].remote.sin_addr),
+				RDT_pipes[pipe_idx].remote.sin_port
+			);
+
+			int ret = send(RDT_pipes[pipe_idx].sock_fd, &fin, sizeof(fin), 0);
+			if (ret != sizeof(fin))
+			{
+				DBG_FPRINTF(stderr, "RDT_close: SYN message did not send correct "
+					"number of bytes.\n");
+				continue;
+			}
+			struct RDT_Packet ack = {0};
+
+			ret = RDT_waitForData(pipe_idx);
+			if (ret == 0)
+			{
+				DBG_PRINTF("RDT_close: Timeout waiting for ACK\n");
+				continue;
+			}
+			else if (ret < 0)
+			{
+				DBG_FPRINTF(stderr, "RDT_close: Error waiting for ACK: %s\n",
+					strerror(errno));
+				continue;
+			}
+
+			ret = recv(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
+			if (ret == -1)
+			{
+				DBG_FPRINTF(stderr, "RDT_close: Error reading ACK: %s", strerror(errno));
+				continue;
+			}
+
+			if (RDT_inet_chksum(&ack, sizeof(ack)) != 0)
+			{
+				DBG_PRINTF("RDT_close: Message received corrupt\n");
+				continue;
+			}
+
+			if ((ack.header.flags & 0x10) != 0x10)
+			{
+				if((ack.header.flags & 0x01) == 0x01){
+					DBG_PRINTF("RDT_close: Message received is a FIN\n");
+					remfin = ack;
+					struct RDT_Packet locack = {0};
+					locack.header.acknum = remfin.header.seqnum;
+					locack.header.rwnd = 0;
+					locack.header.flags = 0x10;
+					uint16_t chksum = RDT_inet_chksum(&locack, sizeof(locack));
+					locack.header.checksum = htons(chksum);
+#ifdef DEBUG_
+					assert(RDT_inet_chksum(&locack, sizeof(locack)) == 0);
+#endif
+					send(RDT_pipes[pipe_idx].sock_fd, &locack, sizeof(locack), 0);
+					REMOTECLOSE(pipe_idx);
+				}
+				DBG_PRINTF("RDT_close: Message received not an ACK\n");
+				continue;
+			}
+
+			if (ack.header.acknum != RDT_pipes[pipe_idx].loc_seq)
+			{
+				DBG_PRINTF("RDT_close: Message received ACKing incorrect seqnum\n");
+				continue;
+			}
+
+			DBG_PRINTF("RDT_close: Received ACK from %s:%d\n", 
+				inet_ntoa(RDT_pipes[pipe_idx].remote.sin_addr),
+				RDT_pipes[pipe_idx].remote.sin_port
+			);
+			LOCALCLOSE(pipe_idx);
+			retransmit = false;
+		}
+		if(!REMOTECLOSED(pipe_idx) && (remfin.header.flags & 0x01) == 0){
+			int ret = recv(RDT_pipes[pipe_idx].sock_fd, &remfin, sizeof(remfin), 0);
+			if(ret == -1){
+				DBG_PRINTF("RDT_close: Error receiving FIN message:%s\n", strerror(errno));
+				REMOTECLOSE(pipe_idx);
+			}
+		}
+		if(!REMOTECLOSED(pipe_idx)){
+			// FIXME: I REALLY JUST WANT TO ACK WHATEVER AND PRETEND IT'S A FIN
+			struct RDT_Packet ack = {0};
+			ack.header.acknum = remfin.header.seqnum;
+			ack.header.rwnd = 0;
+			ack.header.flags = 0x10;
+			uint16_t chksum = RDT_inet_chksum(&ack, sizeof(ack));
+			ack.header.checksum = htons(chksum);
+#ifdef DEBUG_
+			assert(RDT_inet_chksum(&ack, sizeof(ack)) == 0);
+#endif
+			send(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
+			REMOTECLOSE(pipe_idx);
+		}
+	}
 
 	int ret = 0;
 	if ((ret = close(RDT_pipes[pipe_idx].sock_fd)) != 0)
