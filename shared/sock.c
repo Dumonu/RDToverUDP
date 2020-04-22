@@ -65,6 +65,13 @@ struct RDT_Packet
 	char payload[100]; // should be zero-padded if not full
 };
 
+struct RDT_PacketListEntry
+{
+	uint8_t seqnum;
+	bool acked;
+	struct RDT_Packet packet;
+};
+
 // Internal Data Table
 bool RDT_initialized = false;	   // has the table been initialized?
 size_t RDT_allocated = 0;		   // Number of slots allocated in the table
@@ -400,7 +407,7 @@ int RDT_connect(int pipe_idx, const char *addr, uint16_t port)
 		} else if(ret < 0){
 			DBG_FPRINTF(stderr, "RDT_Connect: Error waiting for SYNACK: %s\n",
 				strerror(errno));
-				return -1;
+			return -1;
 		}
 
 		ret = recv(RDT_pipes[pipe_idx].sock_fd, &synack, sizeof(synack), 0);
@@ -451,11 +458,127 @@ int RDT_connect(int pipe_idx, const char *addr, uint16_t port)
 	return 0;
 }
 
+// Sending algorithm for Single Packet RDT Protocol
+int RDT_send_SP(int pipe_idx, struct RDT_PacketListEntry* packlist, int list_len)
+{
+	for(int i = 0; i < list_len; ++i){
+		bool resend = true;
+		while(resend){
+			DBG_PRINTF("Sending packet %d to %s:%d\n", packlist[i].seqnum,
+				inet_ntoa(RDT_pipes[pipe_idx].remote.sin_addr),
+				RDT_pipes[pipe_idx].remote.sin_port);
+
+			int ret = send(RDT_pipes[pipe_idx].sock_fd, &packlist[i].packet,
+				sizeof(packlist[i].packet), 0);
+			if(ret != sizeof(packlist[i].packet)){
+				DBG_FPRINTF(stderr, "RDT_send_SP: Error sending packet: %s\n",
+					strerror(errno));
+				continue;
+			}
+
+			ret = RDT_waitForData(pipe_idx);
+			if(ret == 0){
+				DBG_PRINTF("RDT_send_SP: Timeout waiting for ACK\n");
+				continue;
+			} else if(ret < 0){
+				DBG_FPRINTF(stderr, "RDT_send_SP: Error waiting for ACK: %s\n",
+					strerror(errno));
+				continue; // Should this ever happen?
+			}
+
+			struct RDT_Packet ack = {0};
+			ret = recv(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
+			if(ret == -1){
+				DBG_FPRINTF(stderr, "RDT_send_SP: Error reading ACK: %s\n",
+					strerror(errno));
+				continue; // As before, if we have stuff to read, should this ever happen?
+			}
+
+			if(RDT_inet_chksum(&ack, sizeof(ack)) != 0){
+				DBG_PRINTF("RDT_send_SP: ACK failed checksum\n");
+				continue;
+			}
+
+			if((ack.header.flags & 0x10) != 0x10){
+				DBG_PRINTF("RDT_send_SP: Message received not an ACK\n");
+				continue;
+			}
+
+			if(ack.header.acknum != packlist[i].seqnum){
+				DBG_PRINTF("RDT_send_SP: Message received ACKing incorrect seqnum\n");
+				continue;
+			}
+
+			DBG_PRINTF("RDT_send_SP: Received ACK for %d from %s:%d\n", packlist[i].seqnum,
+				inet_ntoa(RDT_pipes[pipe_idx].remote.sin_addr),
+				RDT_pipes[pipe_idx].remote.sin_port);
+			RDT_pipes[pipe_idx].loc_seq++;
+			resend = false;
+		}
+	}
+	return 0;
+}
+
+int RDT_send_gbN(int pipe_idx, struct RDT_PacketListEntry* packlist, int list_len)
+{
+	return -1;
+}
+
+int RDT_send_SR(int pipe_idx, struct RDT_PacketListEntry* packlist, int list_len)
+{
+	return -1;
+}
+
+// These next two are highly dependent on the protocol
 int RDT_send(int pipe_idx, const void *buf, size_t len)
 {
 	if (pipe_idx >= RDT_allocated)
 		return -1;
-	return -1;
+	if(!CREATED(pipe_idx) || !BOUND(pipe_idx) || !CONNECTED(pipe_idx))
+		return -1;
+
+	int list_len = len / 100 + ((len % 100) > 0 ? 1 : 0);
+	struct RDT_PacketListEntry *packlist = calloc(list_len, sizeof(*packlist));
+	// populate packet list
+	for(size_t i = 0, p = 0; i < list_len && p < len; ++i, p += 100){
+		DBG_PRINTF("RDT_send: Creating packet %d\n",
+			(int)(RDT_pipes[pipe_idx].loc_seq + i));
+		packlist[i].seqnum = RDT_pipes[pipe_idx].loc_seq + i;
+		packlist[i].acked = 0;
+
+		packlist[i].packet.header.seqnum = packlist[i].seqnum;
+		packlist[i].packet.header.acknum = 0;
+		packlist[i].packet.header.rwnd = 1; // TODO: Update for various protocols
+		packlist[i].packet.header.flags = 0;
+		// copy up to 100 bytes from buf to the payload
+		memcpy(&packlist[i].packet.payload, buf + p, min(100, len - p));
+
+		uint16_t chksum = RDT_inet_chksum(&packlist[i].packet, sizeof(packlist[i].packet));
+		packlist[i].packet.header.checksum = htons(chksum);
+#ifdef DEBUG_
+		assert(RDT_inet_chksum(&packlist[i].packet, sizeof(packlist[i].packet)) == 0);
+#endif
+	}
+
+	DBG_PRINTF("RDT_send: Packet List created\n");
+	switch(RDT_pipes[pipe_idx].protocol)
+	{
+		case SINGLE_PACKET:
+			RDT_send_SP(pipe_idx, packlist, list_len);
+			break;
+		case GOBACKN:
+			RDT_send_gbN(pipe_idx, packlist, list_len);
+			break;
+		case SELECTIVE_REPEAT:
+			RDT_send_SR(pipe_idx, packlist, list_len);
+			break;
+		default:
+			DBG_FPRINTF(stderr, "RDT_send: Invalid protocol: %d\n",
+				RDT_pipes[pipe_idx].protocol);
+			break;
+	}
+
+	free(packlist);
 }
 
 int RDT_recv(int pipe_idx, void *buf, size_t len)
@@ -465,6 +588,7 @@ int RDT_recv(int pipe_idx, void *buf, size_t len)
 	return -1;
 }
 
+// TODO: Handle ACKing other side until it finishes
 void RDT_close(int pipe_idx)
 {
 	if (pipe_idx >= RDT_allocated)
