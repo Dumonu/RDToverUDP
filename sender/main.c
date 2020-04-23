@@ -18,5 +18,9 @@ int main(void)
 	RDT_bind(client, "localhost", 5791);
 	RDT_connect(client, "localhost", 18752);
 
+	char msg[100] = {0};
+	scanf("%99s ", msg);
+	RDT_send(client, msg, 100);
+
 	RDT_close(client);
 }

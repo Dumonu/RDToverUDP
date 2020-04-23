@@ -19,5 +19,9 @@ int main(void)
 	RDT_listen(server, 1);
 	RDT_accept(server);
 
+	char msg[100] = {0};
+	RDT_recv(server, msg, 100);
+	printf("%s\n", msg);
+
 	RDT_close(server);
 }

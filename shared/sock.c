@@ -40,6 +40,10 @@ struct RDT_Pipe
 	/* TODO: add protocol implementation data here. */
 	uint8_t loc_seq;
 	uint8_t rem_seq;
+
+	size_t rbuf_len;
+	size_t rbuf_pos;
+	char *rbuf;
 };
 
 struct RDT_Header
@@ -180,6 +184,10 @@ int RDT_socket(enum RDT_Protocol protocol)
 
 	// TODO: change this for real things
 	RDT_pipes[newIdx].msec_timeout = 1000;
+	int buflen = 1000;
+	RDT_pipes[newIdx].rbuf = calloc(1, buflen);
+	RDT_pipes[newIdx].rbuf_len = buflen;
+	RDT_pipes[newIdx].rbuf_pos = 0;
 	/* TODO: Protocol data initialization here */
 	CREATE(newIdx);
 
@@ -581,17 +589,137 @@ int RDT_send(int pipe_idx, const void *buf, size_t len)
 	free(packlist);
 }
 
+// By the time this function is reached, the buffer will have already emptied the pipe
+// read buffer
+int RDT_recv_SP(int pipe_idx, void *buf, size_t len)
+{
+	int seqnum = RDT_pipes[pipe_idx].rem_seq;
+	int packets = len / 100 + ((len % 100) > 0 ? 1 : 0);
+	size_t copied = 0;
+	for(int i = 0; i < packets;){
+		DBG_PRINTF("RDT_recv_SP: Reading packet %d\n", seqnum);
+		struct RDT_Packet packet = {0};
+		struct RDT_Packet ack = {0};
+		int ret = recv(RDT_pipes[pipe_idx].sock_fd, &packet, sizeof(packet), 0);
+		if(ret != sizeof(packet)){
+			DBG_FPRINTF(stderr, "RDT_recv_SP: Error reading packet\n");
+			continue;
+		}
+		
+		if(RDT_inet_chksum(&packet, sizeof(packet)) != 0){
+			DBG_PRINTF("RDT_recv_SP: Packet failed checksum\n");
+			continue;
+		}
+
+		if((packet.header.flags & 0x01) == 0x01){
+			DBG_PRINTF("RDT_recv_SP: Message received is a FIN\n");
+			ack.header.flags |= 0x10;
+			ack.header.acknum = packet.header.seqnum;
+			ack.header.rwnd = 1;
+			int chksum = RDT_inet_chksum(&ack, sizeof(ack));
+			ack.header.checksum = htons(chksum);
+#ifdef DEBUG_
+			assert(RDT_inet_chksum(&ack, sizeof(ack)) == 0);
+#endif
+			send(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
+			REMOTECLOSE(pipe_idx);
+			break;
+		}
+#ifdef DEBUG_
+		// If things are set up properly, this should be fine.
+		assert(seqnum == packet.header.seqnum);
+#endif
+		size_t copy = min(100, len - (i * 100));
+		memcpy(buf + (i * 100), &packet.payload, copy);
+		copied += copy;
+		if(copy < 100){
+			// save the remainder of the packet into the read buffer
+			memcpy(RDT_pipes[pipe_idx].rbuf, &packet.payload + copy, 100 - copy);
+			RDT_pipes[pipe_idx].rbuf_pos = 100 - copy;
+		}
+
+		DBG_PRINTF("RDT_recv_SP: Sending ACK for %d\n", seqnum);
+		ack.header.flags |= 0x10;
+		ack.header.acknum = packet.header.seqnum;
+		ack.header.rwnd = 1;
+		int chksum = RDT_inet_chksum(&ack, sizeof(ack));
+		ack.header.checksum = htons(chksum);
+
+		send(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
+		++i; ++seqnum;
+	}
+	RDT_pipes[pipe_idx].rem_seq = seqnum;
+	return copied;
+}
+
+int RDT_recv_gbN(int pipe_idx, void *buf, size_t len)
+{
+	return -1;
+}
+
+int RDT_recv_SR(int pipe_idx, void *buf, size_t len)
+{
+	return -1;
+}
+
 int RDT_recv(int pipe_idx, void *buf, size_t len)
 {
 	if (pipe_idx >= RDT_allocated)
 		return -1;
-	return -1;
+	if(!CREATED(pipe_idx) || !BOUND(pipe_idx) || !CONNECTED(pipe_idx))
+		return -1;
+
+	// Read any residual data from pipe buffer into buf
+	int start = 0;
+	if(RDT_pipes[pipe_idx].rbuf_pos > 0){
+		// start is number of characters to move to buf
+		// named start because it is where we start writing data from the network
+		start = min(RDT_pipes[pipe_idx].rbuf_pos, len);
+		// Copy the data over
+		memcpy(buf, RDT_pipes[pipe_idx].rbuf, start);
+		// Now, if we didn't use all the data in the buffer, slide any remaining data over
+		if(start < RDT_pipes[pipe_idx].rbuf_pos){
+			// Move data starting at start and going until the end of the known data
+			// to beginning of the buffer
+			memmove(RDT_pipes[pipe_idx].rbuf, RDT_pipes[pipe_idx].rbuf + start,
+				RDT_pipes[pipe_idx].rbuf_pos - start);
+			// No need to zero out the data, because we can assume that only things before
+			// rbuf_pos are valid.
+		}
+		// Update rbuf_pos to take into account the removed data
+		RDT_pipes[pipe_idx].rbuf_pos -= start;
+	}
+
+	if(start == len){
+		return start;
+	}
+
+	DBG_PRINTF("RDT_recv: Extra buffer read\n");
+	switch(RDT_pipes[pipe_idx].protocol)
+	{
+		case SINGLE_PACKET:
+			start += RDT_recv_SP(pipe_idx, buf + start, len - start);
+			break;
+		case GOBACKN:
+			start += RDT_recv_gbN(pipe_idx, buf + start, len - start);
+			break;
+		case SELECTIVE_REPEAT:
+			start += RDT_recv_SR(pipe_idx, buf + start, len - start);
+			break;
+		default:
+			DBG_FPRINTF(stderr, "RDT_recv: Invalid protocol: %d\n",
+				RDT_pipes[pipe_idx].protocol);
+			break;
+	}
+	return start;
 }
 
 // TODO: Handle ACKing other side until it finishes
 void RDT_close(int pipe_idx)
 {
 	if (pipe_idx >= RDT_allocated)
+		return;
+	if(!CREATED(pipe_idx))
 		return;
 
 	if(CONNECTED(pipe_idx)){
@@ -714,6 +842,7 @@ void RDT_close(int pipe_idx)
 	{
 		DBG_FPRINTF(stderr, "RDT_close(%d): %s\n", pipe_idx, strerror(errno));
 	}
+	free(RDT_pipes[pipe_idx].rbuf);
 	memset(RDT_pipes + pipe_idx, 0, sizeof(*RDT_pipes));
 }
 
