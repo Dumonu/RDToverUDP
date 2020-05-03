@@ -1,0 +1,213 @@
+#include <stdio.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <signal.h>
+#include <netinet/in.h>
+#inlude "gbnpacket.c"
+
+#define MAXATT 10 /*Maximum Attemps before giving up
+#define time_sec 3  /* 3 sec interval before retransmission
+
+int attempts = 0;
+int base = 0;
+int windowSize = 0;
+int flag = 1;
+
+void DieWithError(char * errorMessage);     /*error function*/
+void catchAlarm (int ignore);             /*handler for SIGALRM*/
+
+int max(int x, int y);
+int min(int x, int y);
+
+int
+main(int argc, char* argv[]);
+{
+
+	int sock; /*socket*/
+	struct sockaddr_in fromAddr;  /*source address of echo*/                               
+	struct sockaddr_in gbnServAddr; /*echo server address*/
+	struct sigaction action;   /*setting signal handler*/
+	unsigned short gbnServPort; /*Echo Server Port
+	unsigned int fromSize;	/*address size of recFrom()*/
+	char *servIP;		/*address of server*/
+	int chuckSize;		
+	int recDatagram;		/*received datagram size*/
+	int packet_Sent = 1;       /*packet sent*/
+	int packet_Recieved = -1;  /*ack received*/
+	const int dataSize = 8192;  /*buffer size*/
+	char bufer[8192] = " generated char(randomly selected)";  /*buffer character(2^13)*/
+	int packets = 0;  /*# of packets to send*/
+
+if(argc != 5)                     /*test for the number of arguments*/
+{
+	fprintf (stderr, "Usage: %s <Server IP> <Server Port No> <Chuck Size> <Window Size>\n", argv[0]);
+	exit(1);
+}
+
+serverIP = argv[1];       /*arg #1 (server IP address)*/
+chuckSize = atoi(argv[3]);   /*arg #3 (string to echo)*/
+gbnServPort = atoi(argv[2]);  
+windowSize = atio (argv[4]);
+
+if(chuckSize >= 512)
+{	fprintf(stderr, "chuck size must be less than 512\n")
+	exit(1);
+}
+
+packets = dataSize / chunkSize;
+
+if(dataSize % chuckSize)
+	packets++;
+	//packets--;
+
+if((sock = socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0)  /* create a datagram socket (UDP)*/
+	DieWithError("Socket() failed");
+	printf("Created Socket");
+
+/*set signal handler for alarm signal*/
+	action.sa_handler = catchAlarm;
+
+if(sigfillset (&action.sa_mask) < 0)    /*block in handler*/
+DieWithError("sigfillset() failed");  
+action.sa_flags = 0:
+
+if(sigaction (SIGALRM, &action, 0) < 0)
+DieWithError("sigaction() failed for SIGALRM");
+
+                                             
+memset(&gbnServAddr, 0, sizeof(gbnServAddr));  /*Construct the server adddress structure*/
+
+
+gbnServAddr.sin_addr.s_addr = inet_addr(serverIP);   //server IP address
+gbnserv.sin_port = htons(gbnServPort);    // server port
+gbnServAddr.sin_family = AF_INET;
+
+
+while((packet_Received < packets - 1) && (attemps < MAXATT))  //sending string to server
+{
+
+// printf("in the send loop base % packet_Sent % packet_Recieved % d/n"), base, packet_Recieved);
+if(flag > 0)
+{
+int ctrSize;
+flag = 0;
+
+for(ctrSize = 0; ctrSize < windowSize; ctrSize++)    //window size counter
+{
+packet_Sent = min(max(base + ctrSize, packet_Sent), packets - 1); //calculating highest packet sent
+struct gbnpacket currpacket;         //current packets
+
+if((base = ctrSize) < packets)
+{
+memset(&currpacket, 0, sizeof(currpacket));
+printf("sending packet %d packet_Sent %d packet recieved %d /n"' base + ctrSize, packet_Sent, packet_Received);
+currpacket.type = hton1(1);          //conversion to network
+currpacket.seq_no = hton1(base + ctrSize);
+int currLength:
+
+if((dataSize - ((base + ctrSize) * chuckSize)) >= chuckSize)
+	currLength = chunckSize;
+else
+	currLength = dataSize % chuckSize;
+	currpacket.length = hton1(currLength);
+	memcpy(currpacket.data, buffer + ((base + ctrSize) * chuckSize), currLength); //copy bufer data into packet
+
+if(sendto(sock, &currpacket, (sizeof(int)*) + currLength, 0,(struct sockaddr*) &gbnservAddr, sizeof(gbnServaddr)) != ((sizeof(int) * 3) + currLength))
+DieWithError("sendto()sent a differnt number of bytes than expected");
+}
+}
+}
+
+
+fromSize = sizeof(fromAddr);                     /*recieve response*/
+alarm(timeout_secs);
+struct gbnpacket currAck;
+
+while((recDatagram = (recvFrom(sock, &currAck, sizeof(int)*3, 0, (struct sockaddr*) &fromAddr, &fromsize))) < 0)
+if(errno == EINTR)
+{ 
+	if(attempts < MAXATT)
+	{
+	printf("timed out, % more tries...)\n", MAXATT - attempts);
+	break;
+	}
+
+	else 
+	DieWithError("NO RESPONSE");
+	}
+
+else
+DieWithError("recvFrom() failed");
+
+			/*canceled timeout recvFrom(), recieved something*/
+
+if(recDatagram)
+{ 
+int ackType = nton1(currAck.type);
+int ackno = ntoni(currAck.seq_no);
+
+	if(ackno > packet_Received && ackType == 2)
+	{
+		printf("Recieved Ack/n);
+		packet_Recieved++;
+		base = packet_Recieved;
+
+		if(packet_Recieved == packet_Sent)
+		{
+			alarm(0);
+			attemps = 0;
+			sending = 1;
+		}
+		else
+		{
+			attemps = 0;
+			flag = 0;
+			alarm(timeout_sec);
+		}
+	}
+}
+}
+
+int ctrSize;
+for(ctrSize = 0; ctrSize < 10; ctrSize++)   //sends 10 packets
+{
+	struct gbnpacket teardown;
+	teardown.type = hton1(4);
+	teardown.seq_no = hton1(0);
+	teardown.length = hton1(0);
+	sendto(sock, &teardown, (sizeof(int) * 3), 0, (struct sockaddr*) & gbnservAddr, sizeof(gbnservAddr));
+}
+close(sock);  //close socket
+exit(0);
+}
+
+void
+catchAlarm(int ignore)   //handler(SIGALRM)
+{
+	attempt = 1;
+	flag = 1;
+}
+void DieWithError(char * errorMessage)
+{
+	perror(errorMessage);
+	exit(1);
+}
+
+int 
+max(int x, int y)
+{
+	if(y > x)
+		return y;
+		return x:
+}
+int
+if(y > x)
+
+return x:
+return y:
+}
+
