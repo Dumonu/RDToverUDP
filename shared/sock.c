@@ -76,6 +76,12 @@ struct RDT_PacketListEntry
 	struct RDT_Packet packet;
 };
 
+struct PacketNode
+{
+  struct RDT_PacketListEntry packet;
+  struct PacketNode *next;
+};
+
 // Internal Data Table
 bool RDT_initialized = false;	   // has the table been initialized?
 size_t RDT_allocated = 0;		   // Number of slots allocated in the table
@@ -108,7 +114,8 @@ uint16_t RDT_inet_chksum(void* buf, size_t len)
 	size_t wlen = len / sizeof(*words);
 	// sum all words
 	uint32_t sum = 0;
-	for(int i = 0; i < wlen; ++i){
+        int i = 0;
+	for(i = 0; i < wlen; ++i){
 		sum += ntohs(words[i]);
 	}
 	sum = (sum & 0x0000FFFF) + (sum & 0xFFFF0000); // add carry over
@@ -156,7 +163,8 @@ int RDT_socket(enum RDT_Protocol protocol)
 
 	// find earliest open slot
 	int newIdx = -1;
-	for (int i = 0; i < RDT_allocated; ++i)
+	int i = 0;
+	for (i = 0; i < RDT_allocated; ++i)
 	{
 		if (!CREATED(i))
 		{
@@ -469,7 +477,8 @@ int RDT_connect(int pipe_idx, const char *addr, uint16_t port)
 // Sending algorithm for Single Packet RDT Protocol
 int RDT_send_SP(int pipe_idx, struct RDT_PacketListEntry* packlist, int list_len)
 {
-	for(int i = 0; i < list_len; ++i){
+  int i = 0;
+	for(i = 0; i < list_len; ++i){
 		bool resend = true;
 		while(resend){
 			DBG_PRINTF("Sending packet %d to %s:%d\n", packlist[i].seqnum,
@@ -534,7 +543,140 @@ int RDT_send_gbN(int pipe_idx, struct RDT_PacketListEntry* packlist, int list_le
 
 int RDT_send_SR(int pipe_idx, struct RDT_PacketListEntry* packlist, int list_len)
 {
-	return -1;
+  int count = 0;
+  int i = 0;
+  int windowSize = 10;			// Window Size
+  int lowestSeqNotAcked = 0;		// Lowest sequence number that has been sent but no Acked
+  int CORRUPT_PROBA = 0;		// Probability of bit corruption
+  int numTransmits = 0;			// Number of transmits
+  int numRetransmits = 0;		// Number of retransmits
+  int numTOevents = 0;			// Number of timeout events
+  int numBytes = 0;			// Number of bytes transmitted
+  int numCorrupts = 0;			// Number of packets corrupted
+  clock_t start_t = 0;			// Start time
+  clock_t finish_t = 0;			// Finish time
+  clock_t elapsed = 0;			// Time elapsed to complete file transmission
+  struct PacketNode* head = (struct PacketNode*) malloc(sizeof(struct PacketNode));  // List of sent packets
+
+  printf("Enter window size: ");
+  scanf("%d", windowSize);
+  getchar();
+
+  printf("Enter corruption probability: ");
+  scanf("%d", CORRUPT_PROBA);
+  getchar();
+
+  start_t = clock();
+  for (i = 0; i < list_len; ++i)
+    {
+      bool resend = true;
+      while(count < windowSize){
+	DBG_PRINTF("Sending packet %d to %s:%d\n", packlist[i].seqnum,
+		   inet_ntoa(RDT_pipes[pipe_idx].remote.sin_addr),
+		   RDT_pipes[pipe_idx].remote.sin_port);
+
+	// Artificially corrupt a bit with CORRUPT_PROBA chance
+	if ((rand() % 100 + 1) < CORRUPT_PROBA)
+	  {
+	    packlist[i].packet.payload[0] ^= 1UL << 2;
+	    numCorrupts++;
+	  }
+	int ret = send(RDT_pipes[pipe_idx].sock_fd, &packlist[i].packet,
+		       sizeof(packlist[i].packet), 0);
+	if(ret != sizeof(packlist[i].packet)){
+	  DBG_FPRINTF(stderr, "RDT_send_SR: Error sending packet: %s\n",
+		      strerror(errno));
+	  continue;
+	} // end if (ret != sizeof(packlist[i].packet))
+
+	// Keep track of sent packets
+	lowestSeqNotAcked = packlist[i].seqnum;
+	head -> next = (struct PacketNode*) malloc(sizeof(struct PacketNode));
+	count++;
+	numTransmits++;
+	numBytes += sizeof(packlist[i].packet.payload);
+
+	ret = RDT_waitForData(pipe_idx);
+	if(ret == 0){
+	  DBG_PRINTF("RDT_send_SR: Timeout waiting for ACK\n");
+	  numTOevents++;
+	  
+	  int ret = send(RDT_pipes[pipe_idx].sock_fd, &packlist[i].packet,
+		       sizeof(packlist[i].packet), 0);
+	  if(ret != sizeof(packlist[i].packet)){
+	    DBG_FPRINTF(stderr, "RDT_send_SR: Error sending packet: %s\n",
+			strerror(errno));
+	    continue;
+	  } // end if (ret != sizeof(packlist[i].packet))
+	  continue;
+	} // end if (ret == 0)
+	else if(ret < 0){
+	  DBG_FPRINTF(stderr, "RDT_send_SR: Error waiting for ACK: %s\n",
+		      strerror(errno));
+	  continue; // Should this ever happen?
+	} // end else if (ret < 0)
+	
+	struct RDT_Packet ack = {0};
+	ret = recv(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
+	if(ret == -1){
+	  DBG_FPRINTF(stderr, "RDT_send_SR: Error reading ACK: %s\n",
+		      strerror(errno));
+	  continue; // As before, if we have stuff to read, should this ever happen?
+	} // end if (ret == -1)
+	
+	if(RDT_inet_chksum(&ack, sizeof(ack)) != 0){
+	  DBG_PRINTF("RDT_send_SR: ACK failed checksum\n");
+	  continue;
+	} // end if (RDT_inet_chksum(&ack, sizeof(ack)) != 0)
+	
+	if((ack.header.flags & 0x10) != 0x10){
+	  DBG_PRINTF("RDT_send_SR: Message received not an ACK\n");
+	  continue;
+	} // end if((ack.header.flags & 0x10) != 0x10)
+	
+	if(ack.header.acknum != packlist[i].seqnum){
+	  DBG_PRINTF("RDT_send_SR: Message received ACKing incorrect seqnum\n");
+	  continue;
+	} // end if(ack.header.acknum != packlist[i].seqnum)
+	
+	DBG_PRINTF("RDT_send_SR: Received ACK for %d from %s:%d\n", packlist[i].seqnum,
+		   inet_ntoa(RDT_pipes[pipe_idx].remote.sin_addr),
+		   RDT_pipes[pipe_idx].remote.sin_port);
+	RDT_pipes[pipe_idx].loc_seq++;
+	
+	int j = 0;
+	struct PacketNode* nodeptr = head;
+	for (j = 0; j < windowSize; j++)
+	  {
+	    if (packlist[i].seqnum == nodeptr->next->packet.seqnum)
+	      {
+		struct PacketNode* temp = nodeptr->next;
+		nodeptr->next = nodeptr->next->next;
+		free(temp);
+		count--;
+	      } // end if (packlist[i].seqnum == nodeptr->next->packet.seqnum)
+	    nodeptr = nodeptr->next;
+	  } // end for (j = 0; j < windowSize; j++)
+
+	if (lowestSeqNotAcked < head->next->packet.seqnum)
+	  {
+	    lowestSeqNotAcked = head->next->packet.seqnum;
+	  } // end if (lowestSeqNotAcked < head->next->packet.seqnum)
+	
+	resend = false;
+      } // end  while(head != NULL && count < windowSize)
+    } // end for (i = 0; i < list_len; ++i)
+
+  finish_t = clock();
+  elapsed = finish_t - start_t;
+
+  printf("numTransmits: %d\n", numTransmits);
+  printf("numRetransmits: %d\n", numRetransmits);
+  printf("numTOevents: %d\n", numTOevents);
+  printf("numBytes: %d\n", numBytes);
+  printf("numCorrupts: %d\n", numCorrupts);
+  printf("elapsed: %d\n", elapsed);
+  return 0;
 }
 
 // These next two are highly dependent on the protocol
@@ -548,7 +690,8 @@ int RDT_send(int pipe_idx, const void *buf, size_t len)
 	int list_len = len / 100 + ((len % 100) > 0 ? 1 : 0);
 	struct RDT_PacketListEntry *packlist = calloc(list_len, sizeof(*packlist));
 	// populate packet list
-	for(size_t i = 0, p = 0; i < list_len && p < len; ++i, p += 100){
+	size_t i, p = 0;
+	for(i = 0, p = 0; i < list_len && p < len; ++i, p += 100){
 		DBG_PRINTF("RDT_send: Creating packet %d\n",
 			(int)(RDT_pipes[pipe_idx].loc_seq + i));
 		packlist[i].seqnum = RDT_pipes[pipe_idx].loc_seq + i;
@@ -596,7 +739,8 @@ int RDT_recv_SP(int pipe_idx, void *buf, size_t len)
 	int seqnum = RDT_pipes[pipe_idx].rem_seq;
 	int packets = len / 100 + ((len % 100) > 0 ? 1 : 0);
 	size_t copied = 0;
-	for(int i = 0; i < packets;){
+	int i = 0;
+	for(i = 0; i < packets;){
 		DBG_PRINTF("RDT_recv_SP: Reading packet %d\n", seqnum);
 		struct RDT_Packet packet = {0};
 		struct RDT_Packet ack = {0};
@@ -659,7 +803,87 @@ int RDT_recv_gbN(int pipe_idx, void *buf, size_t len)
 
 int RDT_recv_SR(int pipe_idx, void *buf, size_t len)
 {
-	return -1;
+  int seqnum = RDT_pipes[pipe_idx].rem_seq;
+  int packets = len / 100 + ((len % 100) > 0 ? 1 : 0);
+  size_t copied = 0;
+  int i = 0;
+  int windowSize = 10;
+  int lastSeqAcked = 0;
+  int numBytes = 0;
+  int numErrors = 0;
+  
+  for(i = 0; i < packets;){
+    DBG_PRINTF("RDT_recv_SP: Reading packet %d\n", seqnum);
+    struct RDT_Packet packet = {0};
+    struct RDT_Packet ack = {0};
+    int ret = recv(RDT_pipes[pipe_idx].sock_fd, &packet, sizeof(packet), 0);
+    if(ret != sizeof(packet)){
+      DBG_FPRINTF(stderr, "RDT_recv_SP: Error reading packet\n");
+      numErrors++;
+      continue;
+    } // end if (ret != sizeof(packet))
+    
+    if(RDT_inet_chksum(&packet, sizeof(packet)) != 0){
+      DBG_PRINTF("RDT_recv_SP: Packet failed checksum\n");
+      numErrors++;
+      continue;
+    } // end if if(RDT_inet_chksum(&packet, sizeof(packet)) != 0){
+    
+    if((packet.header.flags & 0x01) == 0x01){
+      DBG_PRINTF("RDT_recv_SP: Message received is a FIN\n");
+      ack.header.flags |= 0x10;
+      ack.header.acknum = packet.header.seqnum;
+      ack.header.rwnd = 1;
+      int chksum = RDT_inet_chksum(&ack, sizeof(ack));
+      ack.header.checksum = htons(chksum);
+#ifdef DEBUG_
+      assert(RDT_inet_chksum(&ack, sizeof(ack)) == 0);
+#endif
+      send(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
+			REMOTECLOSE(pipe_idx);
+			break;
+    } // end if((packet.header.flags & 0x01) == 0x01){
+#ifdef DEBUG_
+    // If things are set up properly, this should be fine.
+    assert(seqnum == packet.header.seqnum);
+#endif
+    size_t copy = min(100, len - (i * 100));
+    memcpy(buf + (i * 100), &packet.payload, copy);
+    copied += copy;
+    if(copy < 100){
+      // save the remainder of the packet into the read buffer
+      memcpy(RDT_pipes[pipe_idx].rbuf, &packet.payload + copy, 100 - copy);
+      RDT_pipes[pipe_idx].rbuf_pos = 100 - copy;
+    } // end if (copy < 100)
+    
+
+    if (packet.header.seqnum >= lastSeqAcked && packet.header.seqnum < lastSeqAcked + windowSize)
+      {
+	numBytes += sizeof(packet.payload);
+	DBG_PRINTF("RDT_recv_SP: Sending ACK for %d\n", seqnum);
+	ack.header.flags |= 0x10;
+	ack.header.acknum = packet.header.seqnum;
+	ack.header.rwnd = 1;
+	int chksum = RDT_inet_chksum(&ack, sizeof(ack));
+	ack.header.checksum = htons(chksum);
+	
+	lastSeqAcked = packet.header.seqnum;
+	
+	send(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
+	++i; ++seqnum;
+      } // end if (packet.header.seqnum >= lastSeqAcked && packet.header.seqnum < lastSeqAcked + windowSize)
+    else
+      {
+	DBG_PRINTF("RDT_recv_SR: Packet not valid in window");
+	numErrors++;
+      } 
+ } // end for(i = 0; i < packets;)
+  RDT_pipes[pipe_idx].rem_seq = seqnum;
+  
+  printf("numBytes: %d\n", numBytes);
+  printf("numErrors: %d\n", numErrors);
+  
+  return copied;
 }
 
 int RDT_recv(int pipe_idx, void *buf, size_t len)
