@@ -13,7 +13,7 @@ recv: receiver.o helper.o gbn3.o
 	$(GCC) -o $@ receiver.o helper.o gbn3.o $(LFLAGS)
 
 send: sender.o helper.o gbn3.o
-	$(GCC) -o $@ receiver.o helper.o gbn3.o $(LFLAGS)
+	$(GCC) -o $@ sender.o helper.o gbn3.o $(LFLAGS)
 
 %.o: %.c
 	$(GCC) -c $(CFLAGS) -o $@ $<
