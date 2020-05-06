@@ -49,6 +49,7 @@ clean:
 	done
 	@ $(MAKE) -C $(REC_DIR) clean
 	@ $(MAKE) -C $(SND_DIR) clean
+	@ $(MAKE) -C $(SES_DIR) clean
 	rm -f $(SEXE)
 	rm -f $(REXE)
 	rm -f $(SEXE).dbg
