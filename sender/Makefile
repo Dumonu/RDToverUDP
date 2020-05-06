@@ -1,5 +1,5 @@
 GCC=gcc
-CFLAGS=
+CFLAGS=-std=c99
 LFLAGS=
 
 WRK_DIR=$(abspath .)
