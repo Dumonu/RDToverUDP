@@ -8,12 +8,12 @@
 
 // sender file
 
-#include "gbn.h"
-#include "helper.h"
+#include "s_gbn.h"
+#include "s_helper.h"
 
 #define h_addr h_addr_list[0]
 
-int main(int argc, char *argv[]){
+int gbn_main(int argc, char *argv[]){
 	int sockfd;          /* socket file descriptor of the client            */
 	int numRead;
 	socklen_t socklen;	 /* length of the socket structure sockaddr         */

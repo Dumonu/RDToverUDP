@@ -2,7 +2,6 @@ WRK_DIR=$(abspath .)
 SND_DIR=$(WRK_DIR)/sender
 REC_DIR=$(WRK_DIR)/receiver
 SHR_DIR=$(WRK_DIR)/shared
-SES_DIR=$(WRK_DIR)/SeshensCode
 
 SEXE=send
 REXE=receive
@@ -10,9 +9,6 @@ REXE=receive
 .PHONY: all debug release clean seshen
 
 all: debug release seshen
-
-seshen:
-	@ $(MAKE) -C $(SES_DIR) all
 
 debug:
 	@ for f in $(notdir $(wildcard $(SHR_DIR)/*)); do \
@@ -49,7 +45,6 @@ clean:
 	done
 	@ $(MAKE) -C $(REC_DIR) clean
 	@ $(MAKE) -C $(SND_DIR) clean
-	@ $(MAKE) -C $(SES_DIR) clean
 	rm -f $(SEXE)
 	rm -f $(REXE)
 	rm -f $(SEXE).dbg

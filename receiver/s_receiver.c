@@ -6,10 +6,10 @@
  */
 
 
-#include "gbn.h"
-#include "helper.h"
+#include "s_gbn.h"
+#include "s_helper.h"
 
-int main(int argc, char *argv[])
+int gbn_main(int argc, char *argv[])
 {
 	int sockfd;
 	int newSockfd;

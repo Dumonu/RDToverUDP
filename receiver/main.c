@@ -34,7 +34,7 @@ int main(int argc, char** argv)
 	printf("Receive compiled for %s\n", debrel);
 
 	if(argc != 4){
-		fprintf(stderr, "Usage: %s <SP|SR> <listen_port> <save_file>\n", argv[0]);
+		fprintf(stderr, "Usage: %s <SP|SR|GBN> <listen_port> <save_file>\n", argv[0]);
 		return 1;
 	}
 
@@ -44,8 +44,13 @@ int main(int argc, char** argv)
 	} else if(strcmp(argv[1], "SR") == 0){
 		protocol = SELECTIVE_REPEAT;
 	} else if(strcmp(argv[1], "GBN") == 0){
-		fprintf(stderr, "Go Back N implemented in SeshensCode/send\n");
-		return 1;
+		// Call Seshen's GBN Code
+		char* gbn_argv[3] = {
+			argv[0],
+			argv[2],
+			argv[3],
+		};
+		return gbn_main(3, gbn_argv);
 	} else {
 		fprintf(stderr, "Protocol Unknown: %s\n", argv[1]);
 		return 1;
