@@ -1002,7 +1002,12 @@ void RDT_close(int pipe_idx)
 			ret = recv(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
 			if (ret == -1)
 			{
-				DBG_FPRINTF(stderr, "RDT_close: Error reading ACK: %s", strerror(errno));
+				DBG_FPRINTF(stderr, "RDT_close: Error reading ACK: %s\n", strerror(errno));
+				static int retry = 3;
+				if(retry == 0){
+					break;
+				}
+				retry -= 1;
 				continue;
 			}
 
