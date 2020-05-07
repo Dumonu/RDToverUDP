@@ -6,8 +6,8 @@
  */
 //go back n file which  include the gbn.h 
 
-#include "gbn.h"
-#include "helper.h"
+#include "s_gbn.h"
+#include "s_helper.h"
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
