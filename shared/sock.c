@@ -559,11 +559,11 @@ int RDT_send_SR(int pipe_idx, struct RDT_PacketListEntry* packlist, int list_len
   struct PacketNode* head = (struct PacketNode*) malloc(sizeof(struct PacketNode));  // List of sent packets
 
   printf("Enter window size: ");
-  scanf("%d", windowSize);
+  scanf("%d", &windowSize);
   getchar();
 
   printf("Enter corruption probability: ");
-  scanf("%d", CORRUPT_PROBA);
+  scanf("%d", &CORRUPT_PROBA);
   getchar();
 
   start_t = clock();
@@ -682,6 +682,9 @@ int RDT_send_SR(int pipe_idx, struct RDT_PacketListEntry* packlist, int list_len
 // These next two are highly dependent on the protocol
 int RDT_send(int pipe_idx, const void *buf, size_t len)
 {
+#ifdef DEBUG_
+		fwrite(buf, 1, 100, stdout);
+#endif
 	if (pipe_idx >= RDT_allocated)
 		return -1;
 	if(!CREATED(pipe_idx) || !BOUND(pipe_idx) || !CONNECTED(pipe_idx))
@@ -736,7 +739,7 @@ int RDT_send(int pipe_idx, const void *buf, size_t len)
 // read buffer
 int RDT_recv_SP(int pipe_idx, void *buf, size_t len)
 {
-	int seqnum = RDT_pipes[pipe_idx].rem_seq;
+	uint8_t seqnum = RDT_pipes[pipe_idx].rem_seq;
 	int packets = len / 100 + ((len % 100) > 0 ? 1 : 0);
 	size_t copied = 0;
 	int i = 0;
@@ -803,7 +806,7 @@ int RDT_recv_gbN(int pipe_idx, void *buf, size_t len)
 
 int RDT_recv_SR(int pipe_idx, void *buf, size_t len)
 {
-  int seqnum = RDT_pipes[pipe_idx].rem_seq;
+  uint8_t seqnum = RDT_pipes[pipe_idx].rem_seq;
   int packets = len / 100 + ((len % 100) > 0 ? 1 : 0);
   size_t copied = 0;
   int i = 0;
@@ -1157,5 +1160,5 @@ bool RDT_info_connected(int pipe_idx)
 	if (pipe_idx >= RDT_allocated)
 		return false;
 
-	return CONNECTED(pipe_idx);
+	return CONNECTED(pipe_idx) && !REMOTECLOSED(pipe_idx) && !LOCALCLOSED(pipe_idx);
 }
