@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <errno.h>
+#include <signal.h>
 
 #include "global.h"
 #include "sock.h"
@@ -12,6 +13,21 @@
 #else
 	char* debrel = "Release";
 #endif
+
+int client;
+FILE* in;
+
+void onsigint(int signum){
+	if(RDT_info_created(client)){
+		RDT_close(client);
+	}
+
+	if(in){
+		fclose(in);
+	}
+
+	exit(1);
+}
 
 int main(int argc, char** argv)
 {
@@ -34,6 +50,8 @@ int main(int argc, char** argv)
 		fprintf(stderr, "Protocol Unknown: %s\n", argv[1]);
 		return 1;
 	}
+
+	signal(SIGINT, onsigint);
 
 	int client = RDT_socket(protocol);
 
