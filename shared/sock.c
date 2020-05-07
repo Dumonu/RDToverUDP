@@ -806,87 +806,92 @@ int RDT_recv_gbN(int pipe_idx, void *buf, size_t len)
 
 int RDT_recv_SR(int pipe_idx, void *buf, size_t len)
 {
-  uint8_t seqnum = RDT_pipes[pipe_idx].rem_seq;
-  int packets = len / 100 + ((len % 100) > 0 ? 1 : 0);
-  size_t copied = 0;
-  int i = 0;
-  int windowSize = 10;
-  int lastSeqAcked = 0;
-  int numBytes = 0;
-  int numErrors = 0;
-  
-  for(i = 0; i < packets;){
-    DBG_PRINTF("RDT_recv_SP: Reading packet %d\n", seqnum);
-    struct RDT_Packet packet = {0};
-    struct RDT_Packet ack = {0};
-    int ret = recv(RDT_pipes[pipe_idx].sock_fd, &packet, sizeof(packet), 0);
-    if(ret != sizeof(packet)){
-      DBG_FPRINTF(stderr, "RDT_recv_SP: Error reading packet\n");
-      numErrors++;
-      continue;
-    } // end if (ret != sizeof(packet))
-    
-    if(RDT_inet_chksum(&packet, sizeof(packet)) != 0){
-      DBG_PRINTF("RDT_recv_SP: Packet failed checksum\n");
-      numErrors++;
-      continue;
-    } // end if if(RDT_inet_chksum(&packet, sizeof(packet)) != 0){
-    
-    if((packet.header.flags & 0x01) == 0x01){
-      DBG_PRINTF("RDT_recv_SP: Message received is a FIN\n");
-      ack.header.flags |= 0x10;
-      ack.header.acknum = packet.header.seqnum;
-      ack.header.rwnd = 1;
-      int chksum = RDT_inet_chksum(&ack, sizeof(ack));
-      ack.header.checksum = htons(chksum);
+	uint8_t seqnum = RDT_pipes[pipe_idx].rem_seq;
+	int packets = len / 100 + ((len % 100) > 0 ? 1 : 0);
+	size_t copied = 0;
+	int i = 0;
+	int windowSize = 10;
+	int lastSeqAcked = 0;
+	int numBytes = 0;
+	int numErrors = 0;
+
+	for (i = 0; i < packets;)
+	{
+		DBG_PRINTF("RDT_recv_SP: Reading packet %d\n", seqnum);
+		struct RDT_Packet packet = {0};
+		struct RDT_Packet ack = {0};
+		int ret = recv(RDT_pipes[pipe_idx].sock_fd, &packet, sizeof(packet), 0);
+		if (ret != sizeof(packet))
+		{
+			DBG_FPRINTF(stderr, "RDT_recv_SP: Error reading packet\n");
+			numErrors++;
+			continue;
+		} // end if (ret != sizeof(packet))
+
+		if (RDT_inet_chksum(&packet, sizeof(packet)) != 0)
+		{
+			DBG_PRINTF("RDT_recv_SP: Packet failed checksum\n");
+			numErrors++;
+			continue;
+		} // end if if(RDT_inet_chksum(&packet, sizeof(packet)) != 0){
+
+		if ((packet.header.flags & 0x01) == 0x01)
+		{
+			DBG_PRINTF("RDT_recv_SP: Message received is a FIN\n");
+			ack.header.flags |= 0x10;
+			ack.header.acknum = packet.header.seqnum;
+			ack.header.rwnd = 1;
+			int chksum = RDT_inet_chksum(&ack, sizeof(ack));
+			ack.header.checksum = htons(chksum);
 #ifdef DEBUG_
-      assert(RDT_inet_chksum(&ack, sizeof(ack)) == 0);
+			assert(RDT_inet_chksum(&ack, sizeof(ack)) == 0);
 #endif
-      send(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
+			send(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
 			REMOTECLOSE(pipe_idx);
 			break;
-    } // end if((packet.header.flags & 0x01) == 0x01){
+		} // end if((packet.header.flags & 0x01) == 0x01){
 #ifdef DEBUG_
-    // If things are set up properly, this should be fine.
-    assert(seqnum == packet.header.seqnum);
+		// If things are set up properly, this should be fine.
+		assert(seqnum == packet.header.seqnum);
 #endif
-    size_t copy = min(100, len - (i * 100));
-    memcpy(buf + (i * 100), &packet.payload, copy);
-    copied += copy;
-    if(copy < 100){
-      // save the remainder of the packet into the read buffer
-      memcpy(RDT_pipes[pipe_idx].rbuf, &packet.payload + copy, 100 - copy);
-      RDT_pipes[pipe_idx].rbuf_pos = 100 - copy;
-    } // end if (copy < 100)
-    
+		size_t copy = min(100, len - (i * 100));
+		memcpy(buf + (i * 100), &packet.payload, copy);
+		copied += copy;
+		if (copy < 100)
+		{
+			// save the remainder of the packet into the read buffer
+			memcpy(RDT_pipes[pipe_idx].rbuf, &packet.payload + copy, 100 - copy);
+			RDT_pipes[pipe_idx].rbuf_pos = 100 - copy;
+		} // end if (copy < 100)
 
-    if (packet.header.seqnum >= lastSeqAcked && packet.header.seqnum < lastSeqAcked + windowSize)
-      {
-	numBytes += sizeof(packet.payload);
-	DBG_PRINTF("RDT_recv_SP: Sending ACK for %d\n", seqnum);
-	ack.header.flags |= 0x10;
-	ack.header.acknum = packet.header.seqnum;
-	ack.header.rwnd = 1;
-	int chksum = RDT_inet_chksum(&ack, sizeof(ack));
-	ack.header.checksum = htons(chksum);
-	
-	lastSeqAcked = packet.header.seqnum;
-	
-	send(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
-	++i; ++seqnum;
-      } // end if (packet.header.seqnum >= lastSeqAcked && packet.header.seqnum < lastSeqAcked + windowSize)
-    else
-      {
-	DBG_PRINTF("RDT_recv_SR: Packet not valid in window");
-	numErrors++;
-      } 
- } // end for(i = 0; i < packets;)
-  RDT_pipes[pipe_idx].rem_seq = seqnum;
-  
-  printf("numBytes: %d\n", numBytes);
-  printf("numErrors: %d\n", numErrors);
-  
-  return copied;
+		if (packet.header.seqnum >= lastSeqAcked && packet.header.seqnum < lastSeqAcked + windowSize)
+		{
+			numBytes += sizeof(packet.payload);
+			DBG_PRINTF("RDT_recv_SP: Sending ACK for %d\n", seqnum);
+			ack.header.flags |= 0x10;
+			ack.header.acknum = packet.header.seqnum;
+			ack.header.rwnd = 1;
+			int chksum = RDT_inet_chksum(&ack, sizeof(ack));
+			ack.header.checksum = htons(chksum);
+
+			lastSeqAcked = packet.header.seqnum;
+
+			send(RDT_pipes[pipe_idx].sock_fd, &ack, sizeof(ack), 0);
+			++i;
+			++seqnum;
+		} // end if (packet.header.seqnum >= lastSeqAcked && packet.header.seqnum < lastSeqAcked + windowSize)
+		else
+		{
+			DBG_PRINTF("RDT_recv_SR: Packet not valid in window");
+			numErrors++;
+		}
+	} // end for(i = 0; i < packets;)
+	RDT_pipes[pipe_idx].rem_seq = seqnum;
+
+	printf("numBytes: %d\n", numBytes);
+	printf("numErrors: %d\n", numErrors);
+
+	return copied;
 }
 
 int RDT_recv(int pipe_idx, void *buf, size_t len)
